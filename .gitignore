@@ -1,0 +1,10 @@
+# Virtual environments
+gis_ocr/
+gisocr312/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OCR output files
+inspection_*.xlsx
