@@ -11,9 +11,9 @@ from google.cloud import vision
 BASE_PATH = Path(r"C:\Users\Rangga Saputra\Documents\Test_data")
 IMAGE_NAME_CONTAINS = ""  # Empty string means "use all images".
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
-SAMPLE_LIMIT = None  # Use None to process every folder.
+SAMPLE_LIMIT = None  # Use None to process every image.
 OUTPUT_PREFIX = "inspection_test_data"
-EXPECTED_NUMBER = "06039"  # Used when testing images directly in BASE_PATH.
+OCR_DIGIT_COUNT = 5
 USE_PREPROCESSING = True
 MAX_PREPROCESSING_VARIANTS = 8  # Keep this low for large Google Vision batches.
 
@@ -35,14 +35,9 @@ def ocr_normalize(text):
 
     return text
 
-def find_five_digit_numbers(text):
+def find_digit_numbers(text):
     cleaned = ocr_normalize(text)
-    return re.findall(r"\d{5}", cleaned)
-
-
-def find_five_digit_number(text):
-    numbers = find_five_digit_numbers(text)
-    return numbers[0] if numbers else None
+    return re.findall(rf"\d{{{OCR_DIGIT_COUNT}}}", cleaned)
 
 
 def detect_text_from_bytes(client, image_bytes):
@@ -260,38 +255,30 @@ def find_images(folder):
         ]
     )
 
-def scan_folder(client, folder, expected):
-    try:
-        images = find_images(folder)
-    except PermissionError:
-        return "Access Denied", 0, ""
 
-    best_detected = "Not Detected"
-    best_difference = None
-    best_source_image = ""
+def find_all_images(base_path):
+    if base_path.is_file():
+        if base_path.suffix.lower() in IMAGE_EXTENSIONS:
+            return [base_path]
+        return []
 
-    for image_path in images:
-        image_results = scan_image(client, image_path, expected)
-        if not image_results:
-            print(f"  {image_path.name}: no 5-digit number found")
-            continue
+    images = []
+    for current_dir, _, files in os.walk(base_path):
+        folder = Path(current_dir)
+        for filename in files:
+            image_path = folder / filename
+            if IMAGE_NAME_CONTAINS and IMAGE_NAME_CONTAINS not in image_path.name:
+                continue
+            if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
 
-        for lamp_number, variant_name in image_results:
-            print(f"  {image_path.name} [{variant_name}]: detected {lamp_number}")
+            images.append(image_path)
 
-            difference = count_digit_differences(expected, lamp_number)
-            if best_difference is None or difference < best_difference:
-                best_detected = lamp_number
-                best_difference = difference
-                best_source_image = f"{image_path.name} [{variant_name}]"
-
-            if lamp_number == expected:
-                return lamp_number, len(images), best_source_image
-
-    return best_detected, len(images), best_source_image
+    images = sorted(images)
+    return images[:SAMPLE_LIMIT] if SAMPLE_LIMIT else images
 
 
-def scan_image(client, image_path, expected):
+def scan_image(client, image_path):
     results = []
     seen = set()
 
@@ -310,16 +297,13 @@ def scan_image(client, image_path, expected):
             print(f"  Warning: OCR failed for {image_path.name} [{variant_name}]: {exc}")
             continue
 
-        for lamp_number in find_five_digit_numbers(detected_text):
-            key = (lamp_number, variant_name)
+        for lamp_number in find_digit_numbers(detected_text):
+            key = lamp_number
             if key in seen:
                 continue
 
             seen.add(key)
             results.append((lamp_number, variant_name))
-
-            if lamp_number == expected:
-                return results
 
     return results
 
@@ -329,32 +313,6 @@ def next_output_file():
         counter += 1
 
     return Path(f"{OUTPUT_PREFIX}_{counter}.xlsx")
-
-
-def get_result(expected, detected):
-    if detected == expected:
-        return "Match"
-    if detected in ("Not Detected", "Access Denied"):
-        return detected
-    return "Mismatch"
-
-
-def count_digit_differences(expected, detected):
-    if len(expected) != len(detected):
-        return max(len(expected), len(detected))
-
-    return sum(left != right for left, right in zip(expected, detected))
-
-
-def find_scan_targets():
-    folders = [folder for folder in BASE_PATH.iterdir() if folder.is_dir()]
-    if folders:
-        return folders[:SAMPLE_LIMIT] if SAMPLE_LIMIT else folders
-
-    if find_images(BASE_PATH):
-        return [BASE_PATH]
-
-    return []
 
 
 def main():
@@ -368,39 +326,48 @@ def main():
     client = vision.ImageAnnotatorClient()
     print(f"OpenCV preprocessing: {'on' if USE_PREPROCESSING else 'off'}")
 
-    folders = find_scan_targets()
-    if not folders:
+    images = find_all_images(BASE_PATH)
+    if not images:
         raise SystemExit(f"No images or folders found in: {BASE_PATH}")
 
-    print(f"Processing {len(folders)} folders...\n")
+    print(f"Processing {len(images)} images...\n")
 
     rows = []
-    for index, folder in enumerate(folders, start=1):
-        expected = EXPECTED_NUMBER if folder == BASE_PATH else folder.name
-        detected, image_count, source_image = scan_folder(client, folder, expected)
-        result = get_result(expected, detected)
+    for index, image_path in enumerate(images, start=1):
+        image_results = scan_image(client, image_path)
+
+        if image_results:
+            detected_numbers = [number for number, _ in image_results]
+            detected = detected_numbers[0]
+            all_detected = ", ".join(detected_numbers)
+            source_variant = image_results[0][1]
+            status = "Detected"
+        else:
+            detected = "Not Detected"
+            all_detected = ""
+            source_variant = ""
+            status = "Not Detected"
 
         rows.append(
             {
-                "Folder ID": folder.name,
-                "Expected Lamp Number": expected,
+                "Image Name": image_path.name,
+                "Image Path": str(image_path),
                 "Detected": detected,
-                "Result": result,
-                "Images Checked": image_count,
-                "Source Image": source_image,
+                "All Detected Numbers": all_detected,
+                "Status": status,
+                "Source Variant": source_variant,
             }
         )
 
-        print(f"[{index}/{len(folders)}] {folder.name} -> {detected} ({result})")
+        print(f"[{index}/{len(images)}] {image_path.name} -> {detected} ({status})")
 
     df = pd.DataFrame(rows)
     output_file = next_output_file()
     df.to_excel(output_file, index=False)
 
     print(f"\nDone! Results saved to {output_file}")
-    print(f"Matched: {len(df[df['Result'] == 'Match'])}/{len(df)}")
-    print(f"Mismatch: {len(df[df['Result'] == 'Mismatch'])}/{len(df)}")
-    print(f"Not found: {len(df[df['Result'] == 'Not Detected'])}/{len(df)}")
+    print(f"Detected: {len(df[df['Status'] == 'Detected'])}/{len(df)}")
+    print(f"Not found: {len(df[df['Status'] == 'Not Detected'])}/{len(df)}")
 
 
 if __name__ == "__main__":
