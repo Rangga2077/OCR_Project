@@ -1,4 +1,5 @@
 # Virtual environments
+.venv/
 gis_ocr/
 gisocr312/
 
@@ -8,3 +9,15 @@ __pycache__/
 
 # OCR output files
 inspection_*.xlsx
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
+# Google Cloud credential files
+vision-cred.json
+service-account*.json
+google-credentials*.json
+*cred*.json
+*credentials*.json
